@@ -7,6 +7,7 @@
 //! foreground executor via `Entity::update`, so the render thread never blocks.
 
 mod brew;
+mod github;
 mod rank;
 
 use brew::Pkg;
@@ -30,7 +31,8 @@ actions!(
         ClearSearch,
         ViewOutdated,
         ViewInstalled,
-        ViewBrowse
+        ViewBrowse,
+        ViewSettings
     ]
 );
 
@@ -54,6 +56,7 @@ enum Tab {
     Outdated,
     Installed,
     Browse,
+    Settings,
 }
 
 /// Column layout, shared by the header and every row so they cannot drift.
@@ -188,6 +191,12 @@ struct Kettle {
     /// Raw brew output is diagnostic, not ambient. Closed until you ask for it,
     /// or until a run starts and it becomes the thing you're watching.
     log_open: bool,
+    /// GitHub login, when signed in. None means signed out.
+    github_user: Option<String>,
+    /// Set while a Device Flow sign-in is waiting on the browser. Holds the
+    /// code the user has to type, so the UI can keep showing it.
+    device: Option<Arc<github::DeviceCode>>,
+    auth_msg: SharedString,
     busy: bool,
     status: SharedString,
     scroll: UniformListScrollHandle,
@@ -209,12 +218,18 @@ impl Kettle {
             cursor: None,
             log: Arc::new(Mutex::new(Vec::new())),
             log_open: false,
+            github_user: None,
+            device: None,
+            auth_msg: "".into(),
             busy: false,
             status: "Loading".into(),
             scroll: UniformListScrollHandle::new(),
             focus: cx.focus_handle(),
         };
         k.refresh(cx);
+        // Pick up an existing GitHub sign-in, if the keychain still has a token
+        // GitHub still honours.
+        k.restore_session(cx);
         k
     }
 
@@ -234,6 +249,8 @@ impl Kettle {
             Tab::Outdated => self.outdated.clone(),
             Tab::Installed => self.installed.clone(),
             Tab::Browse => self.catalog.clone(),
+            // Settings is not a package list; it renders its own panel.
+            Tab::Settings => Vec::new(),
         };
         if self.tab == Tab::Installed {
             let stale: HashSet<&str> = self.outdated.iter().map(|p| p.name.as_str()).collect();
@@ -293,6 +310,127 @@ impl Kettle {
         self.selected.insert(self.rows[n]);
         // Non-strict: a row already on screen doesn't yank the viewport.
         self.scroll.scroll_to_item(n, ScrollStrategy::Top);
+    }
+
+    /// Restore an existing sign-in. Verifying against GitHub rather than
+    /// trusting the keychain means a token revoked on the website shows as
+    /// signed out here, instead of failing mysteriously later.
+    fn restore_session(&mut self, cx: &mut Context<Self>) {
+        let Some(token) = github::load_token() else { return };
+        cx.spawn(async move |this, cx| {
+            let who = cx.background_spawn(async move { github::whoami(&token) }).await;
+            this.update(cx, |this, cx| {
+                match who {
+                    Ok(login) => this.github_user = Some(login),
+                    // Revoked or expired: drop it so the UI offers sign-in again.
+                    Err(_) => github::delete_token(),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Device Flow: ask for a code, show it, open the browser, then poll.
+    fn sign_in(&mut self, cx: &mut Context<Self>) {
+        if self.device.is_some() {
+            return; // already waiting on the browser
+        }
+        self.auth_msg = "Contacting GitHub".into();
+        cx.spawn(async move |this, cx| {
+            let dc = cx.background_spawn(async move { github::request_device_code() }).await;
+            let dc = match dc {
+                Ok(d) => Arc::new(d),
+                Err(e) => {
+                    this.update(cx, |this, cx| {
+                        this.auth_msg = e.into();
+                        cx.notify();
+                    })
+                    .ok();
+                    return;
+                }
+            };
+
+            let uri = dc.verification_uri.clone();
+            this.update(cx, |this, cx| {
+                this.auth_msg = "".into();
+                this.device = Some(dc.clone());
+                cx.notify();
+            })
+            .ok();
+            github::open_in_browser(&uri);
+
+            // Poll until the user finishes, the code expires, or GitHub says no.
+            let deadline = std::time::Instant::now()
+                + std::time::Duration::from_secs(dc.expires_in.min(1800));
+            let mut wait = dc.interval.max(5);
+            loop {
+                if std::time::Instant::now() >= deadline {
+                    this.update(cx, |this, cx| {
+                        this.device = None;
+                        this.auth_msg = "The code expired. Try again.".into();
+                        cx.notify();
+                    })
+                    .ok();
+                    return;
+                }
+                cx.background_executor()
+                    .timer(std::time::Duration::from_secs(wait))
+                    .await;
+
+                let code = dc.device_code.clone();
+                let r = cx.background_spawn(async move { github::poll_once(&code) }).await;
+                match r {
+                    Ok(github::Poll::Pending) => continue,
+                    // GitHub asked us to back off; honour it or it starts erroring.
+                    Ok(github::Poll::SlowDown(extra)) => {
+                        wait += extra;
+                        continue;
+                    }
+                    Ok(github::Poll::Token(token)) => {
+                        let t2 = token.clone();
+                        let who = cx
+                            .background_spawn(async move {
+                                let stored = github::store_token(&t2);
+                                (stored, github::whoami(&t2))
+                            })
+                            .await;
+                        this.update(cx, |this, cx| {
+                            this.device = None;
+                            match who {
+                                (Ok(()), Ok(login)) => {
+                                    this.github_user = Some(login);
+                                    this.auth_msg = "".into();
+                                }
+                                (Err(e), _) | (_, Err(e)) => this.auth_msg = e.into(),
+                            }
+                            cx.notify();
+                        })
+                        .ok();
+                        return;
+                    }
+                    Err(e) => {
+                        this.update(cx, |this, cx| {
+                            this.device = None;
+                            this.auth_msg = e.into();
+                            cx.notify();
+                        })
+                        .ok();
+                        return;
+                    }
+                }
+            }
+        })
+        .detach();
+    }
+
+    fn sign_out(&mut self, cx: &mut Context<Self>) {
+        github::delete_token();
+        self.github_user = None;
+        self.device = None;
+        self.auth_msg = "".into();
+        cx.notify();
     }
 
     /// Switch views. Shared by the sidebar click and the Cmd-1/2/3 bindings.
@@ -560,6 +698,229 @@ impl Kettle {
             }))
     }
 
+    /// A settings section: a heading, then rows of content.
+    fn section(&self, title: &'static str, rows: Vec<gpui::AnyElement>) -> impl IntoElement {
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .mb(px(28.0))
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(FAINT))
+                    .pb_1()
+                    .border_b_1()
+                    .border_color(rgb(LINE))
+                    .child(title),
+            )
+            .children(rows)
+    }
+
+    /// One labelled line of settings: label on the left, value on the right.
+    fn setting_row(label: &'static str, value: String, dim: bool) -> gpui::AnyElement {
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_3()
+            // Narrow enough that a half- or third-width tiled window still has
+            // room for the value beside it.
+            .child(div().w(px(112.0)).flex_shrink_0().text_sm().text_color(rgb(MUTE)).child(label))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .text_sm()
+                    .text_color(rgb(if dim { FAINT } else { INK }))
+                    .child(value),
+            )
+            .into_any_element()
+    }
+
+    fn settings_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let signed_in = self.github_user.clone();
+        let device = self.device.clone();
+        let secret_path = std::env::var("HOME")
+            .map(|h| format!("{h}/.config/kettle/sudo-secret"))
+            .unwrap_or_default();
+        let secret_ok = std::path::Path::new(&secret_path).is_file();
+
+        div()
+            .flex_1()
+            .overflow_hidden()
+            .p(px(24.0))
+            .flex()
+            .flex_col()
+            // ---- GitHub
+            .child(self.section(
+                "GitHub",
+                vec![
+                    match (&signed_in, &device) {
+                        // Mid sign-in the code IS the interface: you have to read
+                        // it and type it elsewhere. It gets its own block at the
+                        // largest size in the app, not a label/value row that a
+                        // narrow window can truncate.
+                        (_, Some(d)) => {
+                            let code = d.user_code.clone();
+                            let uri = d.verification_uri.clone();
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .text_color(rgb(MUTE))
+                                        .child("Enter this code at GitHub"),
+                                )
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_row()
+                                        .items_center()
+                                        .gap_3()
+                                        .child(
+                                            div()
+                                                .px_3()
+                                                .py_2()
+                                                .rounded(px(6.0))
+                                                .bg(rgb(0x1A1A1A))
+                                                .border_1()
+                                                .border_color(rgb(STALE))
+                                                .font_family(MONO_FONT)
+                                                .text_2xl()
+                                                .text_color(rgb(STALE))
+                                                .child(code.clone()),
+                                        )
+                                        .child(self.button(
+                                            "gh-copy",
+                                            "Copy".into(),
+                                            false,
+                                            true,
+                                            cx,
+                                            move |_, cx| {
+                                                cx.write_to_clipboard(
+                                                    gpui::ClipboardItem::new_string(code.clone()),
+                                                );
+                                            },
+                                        )),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(rgb(FAINT))
+                                        .child(format!("{uri} — waiting for you to finish there")),
+                                )
+                                .into_any_element()
+                        }
+                        (Some(login), None) => {
+                            Self::setting_row("Signed in as", login.clone(), false)
+                        }
+                        (None, None) => Self::setting_row(
+                            "Status",
+                            "Not signed in".into(),
+                            true,
+                        ),
+                    },
+                    Self::setting_row(
+                        "Rate limit",
+                        if signed_in.is_some() {
+                            "5000 requests/hour".into()
+                        } else {
+                            "60 requests/hour (unauthenticated)".to_string()
+                        },
+                        signed_in.is_none(),
+                    ),
+                    Self::setting_row(
+                        "Scope",
+                        "read:user — no repository access".into(),
+                        true,
+                    ),
+                    div()
+                        .flex()
+                        .flex_row()
+                        .gap_2()
+                        .pt_1()
+                        .child(if signed_in.is_some() {
+                            self.button("gh-out", "Sign out".into(), false, true, cx, |t, cx| {
+                                t.sign_out(cx)
+                            })
+                            .into_any_element()
+                        } else {
+                            self.button(
+                                "gh-in",
+                                if device.is_some() {
+                                    "Waiting…".into()
+                                } else {
+                                    "Sign in with GitHub".to_string()
+                                },
+                                true,
+                                device.is_none(),
+                                cx,
+                                |t, cx| t.sign_in(cx),
+                            )
+                            .into_any_element()
+                        })
+                        .when(!self.auth_msg.is_empty(), |d| {
+                            d.child(
+                                div()
+                                    .text_sm()
+                                    .text_color(rgb(FAIL))
+                                    .child(self.auth_msg.clone()),
+                            )
+                        })
+                        .into_any_element(),
+                ],
+            ))
+            // ---- sudo
+            .child(self.section(
+                "Administrator password",
+                vec![
+                    Self::setting_row(
+                        "1Password",
+                        if secret_ok {
+                            "Configured".into()
+                        } else {
+                            "Not configured — sudo will prompt".to_string()
+                        },
+                        !secret_ok,
+                    ),
+                    Self::setting_row("Reference file", secret_path.clone(), true),
+                    div()
+                        .text_xs()
+                        .text_color(rgb(FAINT))
+                        .child(
+                            "Put one op:// reference in that file to answer sudo prompts during \
+                             cask installs. It stores a reference, never a password, and deleting \
+                             the file turns this off.",
+                        )
+                        .into_any_element(),
+                ],
+            ))
+            // ---- homebrew
+            .child(self.section(
+                "Homebrew",
+                vec![
+                    Self::setting_row("Prefix", self.prefix.display().to_string(), true),
+                    Self::setting_row(
+                        "Catalog",
+                        if self.catalog.is_empty() {
+                            "Unavailable — run brew update".into()
+                        } else {
+                            format!("{} formulae and casks", self.catalog.len())
+                        },
+                        self.catalog.is_empty(),
+                    ),
+                    Self::setting_row(
+                        "Installed",
+                        format!("{} packages", self.installed.len()),
+                        true,
+                    ),
+                ],
+            ))
+    }
+
     /// One row. `me` is the entity handle so the click closure -- which only gets
     /// `&mut App`, not `&mut Context<Self>` -- can still mutate our state.
     fn row(&self, i: usize, me: &gpui::Entity<Self>) -> gpui::AnyElement {
@@ -695,7 +1056,7 @@ impl Render for Kettle {
         let verb = if self.tab == Tab::Browse { "Install" } else { "Upgrade" };
         // An empty table should say why it is empty. Staying silent while busy
         // avoids flashing "nothing here" during the initial scan.
-        let empty: Option<String> = if !self.rows.is_empty() || busy {
+        let empty: Option<String> = if !self.rows.is_empty() || busy || self.tab == Tab::Settings {
             None
         } else if !self.query.is_empty() {
             Some(format!("No packages match \u{201C}{}\u{201D}", self.query))
@@ -706,6 +1067,8 @@ impl Render for Kettle {
                 // Browse is only empty if the catalog failed to load; the
                 // Activity log carries the reason.
                 Tab::Browse => "Catalog unavailable \u{2014} run brew update, then Refresh".into(),
+                // Unreachable: guarded above, since Settings has no table.
+                Tab::Settings => "".into(),
             })
         };
         // One lock, one poison policy. Taking it twice let a poisoned mutex show
@@ -725,6 +1088,7 @@ impl Render for Kettle {
             .on_action(cx.listener(|t, _: &ViewOutdated, _, cx| t.select_tab(Tab::Outdated, cx)))
             .on_action(cx.listener(|t, _: &ViewInstalled, _, cx| t.select_tab(Tab::Installed, cx)))
             .on_action(cx.listener(|t, _: &ViewBrowse, _, cx| t.select_tab(Tab::Browse, cx)))
+            .on_action(cx.listener(|t, _: &ViewSettings, _, cx| t.select_tab(Tab::Settings, cx)))
             .on_action(cx.listener(|this, _: &ClearSearch, _, cx| {
                 this.query.clear();
                 this.refilter();
@@ -838,7 +1202,12 @@ impl Render for Kettle {
                             )
                             .child(self.sidebar_item(Tab::Outdated, "Outdated", n_out, cx))
                             .child(self.sidebar_item(Tab::Installed, "Installed", n_inst, cx))
-                            .child(self.sidebar_item(Tab::Browse, "Browse", n_cat, cx)),
+                            .child(self.sidebar_item(Tab::Browse, "Browse", n_cat, cx))
+                            // Settings sits at the foot of the list, away from
+                            // the package views, as it does in most macOS apps.
+                            .child(div().flex_1())
+                            .child(self.sidebar_item(Tab::Settings, "Settings", 0, cx))
+                            .child(div().h(px(8.0))),
                     )
                     // ---- content
                     .child(
@@ -847,6 +1216,12 @@ impl Render for Kettle {
                             .flex_col()
                             .flex_1()
                             .overflow_hidden()
+                            // Settings replaces the table entirely; a column
+                            // header over a settings form would be nonsense.
+                            .when(self.tab == Tab::Settings, |d| {
+                                d.child(self.settings_panel(cx))
+                            })
+                            .when(self.tab != Tab::Settings, |d| d
                             // column header, sentence case rather than SHOUTED CAPS
                             .child(
                                 div()
@@ -927,7 +1302,7 @@ impl Render for Kettle {
                                                 .child(l)
                                         })),
                                 )
-                            }),
+                            })),
                     ),
             )
             // ---- status bar, doubling as the log's disclosure control
@@ -1060,6 +1435,8 @@ fn main() {
             gpui::KeyBinding::new("cmd-1", ViewOutdated, Some("Kettle")),
             gpui::KeyBinding::new("cmd-2", ViewInstalled, Some("Kettle")),
             gpui::KeyBinding::new("cmd-3", ViewBrowse, Some("Kettle")),
+            // Cmd-, is Settings in every macOS app.
+            gpui::KeyBinding::new("cmd-,", ViewSettings, Some("Kettle")),
         ]);
         cx.set_menus(vec![Menu {
             name: "Kettle".into(),
@@ -1067,6 +1444,8 @@ fn main() {
                 MenuItem::action("Outdated", ViewOutdated),
                 MenuItem::action("Installed", ViewInstalled),
                 MenuItem::action("Browse", ViewBrowse),
+                MenuItem::separator(),
+                MenuItem::action("Settings…", ViewSettings),
                 MenuItem::separator(),
                 MenuItem::action("Refresh", Refresh),
                 MenuItem::action("Upgrade All", UpgradeAll),
