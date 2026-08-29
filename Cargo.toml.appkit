@@ -1,0 +1,32 @@
+[package]
+name = "kettle"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = [
+    "NSString", "NSArray", "NSDictionary", "NSValue", "NSGeometry",
+    "NSObject", "NSNotification", "NSRunLoop", "NSThread", "NSDate",
+    "NSURL", "NSError", "NSData", "NSEnumerator", "NSTimer", "NSIndexSet",
+] }
+objc2-app-kit = { version = "0.3", features = [
+    "NSApplication", "NSWindow", "NSView", "NSControl", "NSButton",
+    "NSTextField", "NSTableView", "NSTableColumn", "NSScrollView",
+    "NSResponder", "NSMenu", "NSMenuItem", "NSSegmentedControl",
+    "NSStackView", "NSLayoutConstraint", "NSTextView", "NSFont",
+    "NSColor", "NSCell", "NSTableCellView", "NSSearchField",
+    "NSProgressIndicator", "NSGraphics", "NSImage", "NSStatusBar",
+    "NSStatusItem", "NSStatusBarButton", "NSUserInterfaceItemIdentification",
+    "NSAnimationContext", "NSVisualEffectView", "NSAppearance",
+    "NSLayoutAnchor", "NSTextContent", "NSSplitView", "NSPasteboard",
+] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"

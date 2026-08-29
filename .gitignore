@@ -1,0 +1,9 @@
+# Cargo build output.
+/target/
+
+# Everything under build/ is produced by tools/bundle.sh -- icon.png comes from
+# tools/icon.py, the iconset from sips, and the .app/.dmg from the two. Nothing
+# in here is a source file.
+/build/
+
+.DS_Store

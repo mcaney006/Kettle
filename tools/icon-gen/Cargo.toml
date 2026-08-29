@@ -1,0 +1,11 @@
+[package]
+name = "icon-gen"
+version = "0.1.0"
+edition = "2021"
+
+# Deliberately dependency-free: this replaced a Python + Pillow script, and
+# pulling an image crate back in would just move the dependency rather than
+# remove it. Everything it needs -- rasterising, blurring, PNG encoding -- is
+# in main.rs and compiles in about a second.
+[dependencies]
+# Profile comes from the workspace root; setting one here is ignored.

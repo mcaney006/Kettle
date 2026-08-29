@@ -1,0 +1,12 @@
+[package]
+name = "kettle-askpass"
+version = "0.1.0"
+edition = "2021"
+
+# No dependencies on purpose. This binary handles a password; every crate it
+# linked would be another thing with incidental access to that memory.
+[dependencies]
+
+[[bin]]
+name = "kettle-askpass"
+path = "src/main.rs"
