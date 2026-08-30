@@ -77,7 +77,7 @@ impl SearchInput {
         Self {
             focus: cx.focus_handle().tab_index(0).tab_stop(true),
             content: "".into(),
-            placeholder: "Search all Homebrew packages".into(),
+            placeholder: "Search packages".into(),
             selected: 0..0,
             selection_reversed: false,
             marked: None,
@@ -613,6 +613,7 @@ impl Render for SearchInput {
             .on_mouse_move(cx.listener(Self::mouse_move))
             .h(px(28.))
             .w_full()
+            .overflow_hidden()
             .px_2()
             .flex()
             .items_center()
