@@ -27,7 +27,11 @@ struct Img {
 
 impl Img {
     fn new(w: usize, h: usize) -> Self {
-        Img { w, h, px: vec![0; w * h * 4] }
+        Img {
+            w,
+            h,
+            px: vec![0; w * h * 4],
+        }
     }
 
     fn blend(&mut self, x: usize, y: usize, c: [u8; 4]) {
@@ -41,9 +45,9 @@ impl Img {
             return;
         }
         // Source-over onto an opaque-ish plate.
-        for k in 0..3 {
+        for (k, channel) in c.iter().enumerate().take(3) {
             let dst = self.px[i + k] as u32;
-            self.px[i + k] = ((c[k] as u32 * a + dst * (255 - a)) / 255) as u8;
+            self.px[i + k] = ((*channel as u32 * a + dst * (255 - a)) / 255) as u8;
         }
         let da = self.px[i + 3] as u32;
         self.px[i + 3] = (a + da * (255 - a) / 255).min(255) as u8;
@@ -82,7 +86,7 @@ fn fill_poly(img: &mut Img, pts: &[Pt], color: [u8; 4]) {
         if xs.is_empty() {
             continue;
         }
-        xs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        xs.sort_by(f64::total_cmp);
         let mut i = 0;
         while i + 1 < xs.len() {
             let a = xs[i].max(0.0).round() as isize;
@@ -221,7 +225,7 @@ fn arc_pts(cx: f64, cy: f64, rx: f64, ry: f64, a0: f64, a1: f64, steps: usize) -
 
 /// Three box blurs approximate a Gaussian closely enough for a soft sheen, and
 /// run in O(n) per pass instead of O(n * radius).
-fn box_blur(mask: &mut Vec<u8>, w: usize, h: usize, radius: usize) {
+fn box_blur(mask: &mut [u8], w: usize, h: usize, radius: usize) {
     if radius == 0 {
         return;
     }
@@ -272,7 +276,11 @@ fn crc32(data: &[u8]) -> u32 {
     for (i, e) in table.iter_mut().enumerate() {
         let mut c = i as u32;
         for _ in 0..8 {
-            c = if c & 1 != 0 { 0xEDB8_8320 ^ (c >> 1) } else { c >> 1 };
+            c = if c & 1 != 0 {
+                0xEDB8_8320 ^ (c >> 1)
+            } else {
+                c >> 1
+            };
         }
         *e = c;
     }
@@ -389,8 +397,8 @@ fn main() {
 
     // --- clip to the icon plate
     let mask = squircle_alpha(W, 5.0);
-    for i in 0..W * W {
-        if mask[i] == 0 {
+    for (i, &alpha) in mask.iter().enumerate() {
+        if alpha == 0 {
             img.px[i * 4 + 3] = 0;
         }
     }
@@ -412,7 +420,11 @@ fn main() {
             })
             .collect();
         // Wider at the bottom (near the spout), thinning as it dissipates.
-        fill_poly(&mut img, &ribbon(&pts, WF * 0.020, WF * 0.040), [255, 255, 255, a]);
+        fill_poly(
+            &mut img,
+            &ribbon(&pts, WF * 0.020, WF * 0.040),
+            [255, 255, 255, a],
+        );
     }
 
     // --- body: rounded trapezoid, wider at the shoulder
@@ -458,18 +470,42 @@ fn main() {
             for dy in 0..SS {
                 for dx in 0..SS {
                     let i = ((y * SS + dy) * W + (x * SS + dx)) * 4;
-                    for k in 0..4 {
-                        acc[k] += img.px[i + k] as u32;
+                    for (total, &channel) in acc.iter_mut().zip(&img.px[i..i + 4]) {
+                        *total += channel as u32;
                     }
                 }
             }
             let o = (y * S + x) * 4;
-            for k in 0..4 {
-                small[o + k] = (acc[k] / n) as u8;
+            for (channel, total) in small[o..o + 4].iter_mut().zip(acc) {
+                *channel = (total / n) as u8;
             }
         }
     }
 
     write_png(&out, S, S, &small).expect("write png");
     println!("wrote {out}");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn squircle_keeps_the_center_and_clears_corners() {
+        let mask = squircle_alpha(32, 5.0);
+        assert_eq!(mask[16 * 32 + 16], 255);
+        assert_eq!(mask[0], 0);
+        assert_eq!(mask[31 * 32 + 31], 0);
+    }
+
+    #[test]
+    fn png_writer_emits_signature_and_dimensions() {
+        let path = std::env::temp_dir().join(format!("kettle-icon-{}.png", std::process::id()));
+        write_png(path.to_str().unwrap(), 2, 1, &[255; 8]).unwrap();
+        let png = std::fs::read(&path).unwrap();
+        assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n");
+        assert_eq!(u32::from_be_bytes(png[16..20].try_into().unwrap()), 2);
+        assert_eq!(u32::from_be_bytes(png[20..24].try_into().unwrap()), 1);
+        std::fs::remove_file(path).unwrap();
+    }
 }

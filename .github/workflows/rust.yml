@@ -1,23 +1,58 @@
-name: Rust
+name: Rust quality gate
 
 on:
   push:
-    branches: ["main"]
+    branches: [main]
   pull_request:
-    branches: ["main"]
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: kettle-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  build:
-    permissions:
-      contents: read
-    runs-on: macos-latest
-
+  quality:
+    runs-on: macos-14
+    timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
-      - name: Build
-        run: cargo build --verbose
-      - name: Run tests
-        run: cargo test --verbose
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Install declared Rust targets
+        run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+
+      - name: Formatting
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+
+      - name: Tests
+        run: cargo test --locked --workspace
+
+      - name: Install cargo-deny
+        run: rustup run stable cargo install cargo-deny --locked --version 0.20.2
+
+      - name: Dependency policy
+        # GPUI 0.2.2 is the latest published GPUI release and currently carries
+        # transitive unmaintained notices. Vulnerabilities and direct advisories
+        # remain errors; these notices stay visible until GPUI replaces them.
+        run: cargo deny check --warn unmaintained
+
+      - name: Release build for both supported architectures
+        run: |
+          cargo build --locked --workspace --release --all-features --target aarch64-apple-darwin
+          cargo build --locked --workspace --release --all-features --target x86_64-apple-darwin
+
+      - name: Universal package smoke test
+        run: |
+          ./tools/bundle.sh adhoc
+          pkgutil --payload-files build/Kettle.pkg | grep -q 'Kettle.app/Contents/MacOS/kettle$'
