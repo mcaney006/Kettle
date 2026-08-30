@@ -29,6 +29,7 @@ use gpui::{
 mod views;
 
 use std::{
+    borrow::Cow,
     ops::Range,
     process::Command,
     sync::{
@@ -73,8 +74,8 @@ const COLUMNS: [(&str, f32); 4] = [
     ("Version", 260.),
     ("Description", 0.),
 ];
-const UI_FONT: &str = "SF Pro Text";
-const MONO_FONT: &str = "SF Mono";
+const APP_FONT: &str = "IBM Plex Mono";
+const APP_FONT_DATA: &[u8] = include_bytes!("../../assets/fonts/IBMPlexMono-Regular.ttf");
 
 pub fn run() {
     let launched = Instant::now();
@@ -133,6 +134,9 @@ pub fn run() {
 }
 
 fn configure(cx: &mut App) {
+    cx.text_system()
+        .add_fonts(vec![Cow::Borrowed(APP_FONT_DATA)])
+        .expect("bundled IBM Plex Mono font must load");
     text_input::bind_keys(cx);
     cx.bind_keys([
         gpui::KeyBinding::new("cmd-q", Quit, None),
@@ -717,5 +721,16 @@ fn auth_failure_message(error: &AuthFailure) -> String {
         | AuthFailure::Keychain(message)
         | AuthFailure::Protocol(message) => message.clone(),
         AuthFailure::Expired => "The device code expired".to_owned(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bundled_font_is_a_nonempty_truetype_font() {
+        assert!(APP_FONT_DATA.len() > 100_000);
+        assert_eq!(&APP_FONT_DATA[..4], &[0, 1, 0, 0]);
     }
 }

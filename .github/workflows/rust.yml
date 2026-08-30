@@ -50,5 +50,7 @@ jobs:
           cargo build --workspace --release --all-features --target aarch64-apple-darwin
           cargo build --workspace --release --all-features --target x86_64-apple-darwin
 
-      - name: Development bundle smoke test
-        run: ./tools/bundle.sh dev
+      - name: Universal package smoke test
+        run: |
+          ./tools/bundle.sh adhoc
+          pkgutil --payload-files build/Kettle.pkg | grep -q 'Kettle.app/Contents/MacOS/kettle$'

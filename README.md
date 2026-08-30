@@ -13,7 +13,18 @@ Homebrew remains authoritative for every mutation. Kettle reads installed state 
 
 Kettle is tested for both `aarch64-apple-darwin` and `x86_64-apple-darwin`. It is intentionally a macOS application; other platforms are not supported.
 
-## Build and run
+## Install
+
+Download `Kettle.pkg` from the repository's [Releases](https://github.com/mcaney006/Kettle/releases) page. For a signed and notarized release, open the package in Finder and follow Installer, or run:
+
+```sh
+sudo installer -pkg "$HOME/Downloads/Kettle.pkg" -target /
+open -a Kettle
+```
+
+Only artifacts explicitly labeled **Developer ID signed and notarized** are public release builds. Preview packages may be unsigned and contain an ad-hoc-signed application; do not bypass Gatekeeper to install one on a machine you do not control.
+
+### Build and run from source
 
 ```sh
 git clone https://github.com/mcaney006/Kettle.git
@@ -22,6 +33,8 @@ cargo run --release
 ```
 
 A normal `cargo build` or `cargo run` is the local developer path. It does not create an application bundle, sign a public release, or notarize anything.
+
+Kettle embeds IBM Plex Mono Regular for all application content. Users do not need to install the font separately. The pinned upstream source, checksum, and SIL Open Font License are recorded under [`assets/fonts`](assets/fonts/README.md). Native macOS menus continue to use the system menu font.
 
 ## Architecture
 
@@ -125,8 +138,8 @@ measurements, hardware, workload boundaries, and reproduction commands.
 
 ```sh
 ./tools/bundle.sh dev       # host-architecture .app, ad-hoc signed, not notarized
-./tools/bundle.sh adhoc     # universal .app and DMG, ad-hoc signed, not notarized
-./tools/bundle.sh release   # universal Developer ID signing and notarization
+./tools/bundle.sh adhoc     # universal .app/.dmg and unsigned .pkg, not notarized
+./tools/bundle.sh release   # universal signed/notarized .app/.dmg/.pkg
 ```
 
 Development and ad-hoc artifacts are for local testing. They are not described as publicly distributable.
@@ -136,12 +149,13 @@ Public release mode requires credentials already provisioned outside the reposit
 ```sh
 xcrun notarytool store-credentials kettle-notary
 export KETTLE_CODESIGN_IDENTITY='Developer ID Application: …'
+export KETTLE_INSTALLER_IDENTITY='Developer ID Installer: …'
 export KETTLE_NOTARY_PROFILE='kettle-notary'
 export KETTLE_BUNDLE_ID='owner.assigned.bundle.identifier'
 ./tools/bundle.sh release
 ```
 
-The script never invents an identity. It signs the helper and main executable individually, signs the outer bundle without `--deep`, enables the hardened runtime, verifies every signature, submits the application archive for notarization, staples and validates the app, creates and signs the DMG, notarizes and staples the DMG, and runs `spctl` assessments. Signing and notarization secrets belong in the login Keychain or CI secret store, never in source.
+The script never invents an identity. It signs the helper and main executable individually, signs the outer bundle without `--deep`, enables the hardened runtime, verifies every signature, submits the application archive for notarization, staples and validates the app, creates a Developer ID Installer package for `/Applications`, creates and signs the DMG, notarizes and staples both distribution formats, and runs `spctl` assessments. Signing and notarization secrets belong in the login Keychain or CI secret store, never in source.
 
 ## Known limitations
 
@@ -151,4 +165,5 @@ The script never invents an identity. It signs the helper and main executable in
 - Version ordering is deliberately described as Kettle's local installed-directory ordering, not as a reimplementation of Homebrew's complete version semantics.
 - GPUI 0.2.2 does not expose accessibility labels/roles for arbitrary elements, limiting VoiceOver metadata despite keyboard-operable controls.
 - The latest GPUI dependency graph contains transitive unmaintained-crate advisories with no safe published GPUI upgrade; the dependency gate reports them on every run.
+- Public `.pkg` distribution requires separate Developer ID Application and Developer ID Installer identities plus notarization credentials. Unsigned preview packages are local-test artifacts, not production releases.
 - No source license is present. Selecting and adding a license remains an explicit repository-owner decision.

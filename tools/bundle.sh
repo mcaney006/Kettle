@@ -14,15 +14,21 @@ BUILD="$ROOT/build"
 STAGE="$BUILD/stage.noindex"
 APP="$STAGE/Kettle.app"
 DMG="$BUILD/Kettle.dmg"
+PKG="$BUILD/Kettle.pkg"
 VERSION="$(awk -F'"' '/^version/{print $2; exit}' Cargo.toml)"
 BUNDLE_ID="${KETTLE_BUNDLE_ID:-local.kettle.app}"
-HOST="$(rustc -vV | awk '/^host:/{print $2}')"
+TOOLCHAIN="$(awk -F'"' '/^channel/{print $2; exit}' rust-toolchain.toml)"
+RUSTC="$(rustup which --toolchain "$TOOLCHAIN" rustc)"
+RUSTDOC="$(rustup which --toolchain "$TOOLCHAIN" rustdoc)"
+TOOLCHAIN_BIN="$(dirname "$RUSTC")"
+export PATH="$TOOLCHAIN_BIN:$PATH" RUSTC RUSTDOC
+HOST="$("$RUSTC" -vV | awk '/^host:/{print $2}')"
 
 if [[ "$MODE" == dev ]]; then
   TARGETS=("$HOST")
 else
   TARGETS=(aarch64-apple-darwin x86_64-apple-darwin)
-  INSTALLED="$(rustup target list --installed)"
+  INSTALLED="$(rustup target list --installed --toolchain "$TOOLCHAIN")"
   for target in "${TARGETS[@]}"; do
     grep -qx "$target" <<<"$INSTALLED" || {
       echo "missing Rust target $target; run: rustup target add $target" >&2
@@ -33,9 +39,9 @@ fi
 
 for target in "${TARGETS[@]}"; do
   cargo build --release --target "$target" -p kettle -p kettle-askpass
- done
+done
 
-rm -rf "$STAGE" "$BUILD/dmg.noindex" "$BUILD/AppIcon.iconset" "$DMG"
+rm -rf "$STAGE" "$BUILD/dmg.noindex" "$BUILD/AppIcon.iconset" "$DMG" "$PKG"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 for bin in kettle kettle-askpass; do
   if [[ ${#TARGETS[@]} -eq 1 ]]; then
@@ -80,6 +86,7 @@ plutil -lint "$APP/Contents/Info.plist" >/dev/null
 
 if [[ "$MODE" == release ]]; then
   : "${KETTLE_CODESIGN_IDENTITY:?set KETTLE_CODESIGN_IDENTITY to a Developer ID Application identity}"
+  : "${KETTLE_INSTALLER_IDENTITY:?set KETTLE_INSTALLER_IDENTITY to a Developer ID Installer identity}"
   : "${KETTLE_NOTARY_PROFILE:?set KETTLE_NOTARY_PROFILE to a notarytool keychain profile}"
   SIGN_ARGS=(--force --options runtime --timestamp --sign "$KETTLE_CODESIGN_IDENTITY")
 else
@@ -108,6 +115,19 @@ if [[ "$MODE" == release ]]; then
   xcrun stapler validate "$APP"
 fi
 
+if [[ "$MODE" == release ]]; then
+  productbuild --sign "$KETTLE_INSTALLER_IDENTITY" \
+    --component "$APP" /Applications "$PKG"
+  pkgutil --check-signature "$PKG"
+  xcrun notarytool submit "$PKG" --keychain-profile "$KETTLE_NOTARY_PROFILE" --wait
+  xcrun stapler staple "$PKG"
+  xcrun stapler validate "$PKG"
+  spctl --assess --type install --verbose=2 "$PKG"
+else
+  productbuild --component "$APP" /Applications "$PKG"
+fi
+pkgutil --payload-files "$PKG" | grep -q 'Kettle.app/Contents/MacOS/kettle$'
+
 mkdir -p "$BUILD/dmg.noindex"
 cp -R "$APP" "$BUILD/dmg.noindex/"
 ln -s /Applications "$BUILD/dmg.noindex/Applications"
@@ -124,7 +144,9 @@ if [[ "$MODE" == release ]]; then
   spctl --assess --type open --context context:primary-signature --verbose=2 "$DMG"
   echo "notarized release app: $APP"
   echo "notarized release dmg: $DMG"
+  echo "notarized release pkg: $PKG"
 else
   echo "ad-hoc app (not notarized; local testing only): $APP"
   echo "ad-hoc dmg (not notarized; local testing only): $DMG"
+  echo "unsigned pkg containing the ad-hoc app (local testing only): $PKG"
 fi

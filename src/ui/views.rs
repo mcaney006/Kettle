@@ -157,7 +157,7 @@ impl Kettle {
             .child(cell(1).text_color(rgb(theme.faint)).child(kind))
             .child(
                 cell(2)
-                    .font_family(MONO_FONT)
+                    .font_family(APP_FONT)
                     .flex()
                     .items_center()
                     .gap_1()
@@ -218,7 +218,7 @@ impl Kettle {
             panel = panel
                 .child(
                     div()
-                        .font_family(MONO_FONT)
+                        .font_family(APP_FONT)
                         .text_2xl()
                         .text_color(rgb(theme.stale))
                         .child(prompt.user_code.clone()),
@@ -400,7 +400,7 @@ impl Render for Kettle {
             .flex_col()
             .bg(rgb(theme.background))
             .text_color(rgb(theme.text))
-            .font_family(UI_FONT)
+            .font_family(APP_FONT)
             .child(
                 div()
                     .flex()
@@ -633,7 +633,7 @@ impl Kettle {
                         .children(logs.into_iter().map(|event| {
                             div()
                                 .text_xs()
-                                .font_family(MONO_FONT)
+                                .font_family(APP_FONT)
                                 .text_color(rgb(log_color(event.level, theme)))
                                 .whitespace_nowrap()
                                 .overflow_hidden()
