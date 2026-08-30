@@ -49,6 +49,13 @@ fn local_installed_directory_order_matches_homebrew_for_corpus() {
             other => panic!("unexpected Homebrew comparison {other:?}"),
         })
         .collect();
+    assert_eq!(
+        authoritative.len(),
+        CORPUS.len() * CORPUS.len(),
+        "Homebrew returned {} comparisons for {} pairs",
+        authoritative.len(),
+        CORPUS.len() * CORPUS.len()
+    );
     let mut index = 0;
     for &left in CORPUS {
         for &right in CORPUS {

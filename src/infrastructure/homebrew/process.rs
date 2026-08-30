@@ -1,10 +1,16 @@
 use super::super::InfrastructureError;
+use nix::{
+    errno::Errno,
+    sys::signal::{Signal, killpg},
+    unistd::Pid,
+};
 use std::{
     collections::HashMap,
     ffi::OsString,
     io::{BufRead, BufReader},
+    os::unix::process::CommandExt,
     path::PathBuf,
-    process::{Command, Stdio},
+    process::{Child, Command, Stdio},
     sync::mpsc,
     time::Duration,
 };
@@ -39,13 +45,16 @@ pub(crate) fn run(
     cancelled: &dyn Fn() -> bool,
     mut on_event: impl FnMut(ProcessEvent),
 ) -> Result<ProcessOutput, InfrastructureError> {
-    let mut child = Command::new(&spec.program)
+    let mut command = Command::new(&spec.program);
+    command
         .args(&spec.args)
         .envs(&spec.env)
         .current_dir(&spec.current_dir)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
+        .process_group(0);
+    let mut child = command
         .spawn()
         .map_err(|source| InfrastructureError::Invocation {
             program: spec.program.clone(),
@@ -63,17 +72,11 @@ pub(crate) fn run(
     let stderr_reader = spawn_reader(stderr, ProcessStream::Stderr, sender);
     let mut captured_stdout = Vec::new();
     let mut captured_stderr = Vec::new();
-    let mut killed = false;
+    let mut terminated = false;
 
     loop {
-        if cancelled() && !killed {
-            child
-                .kill()
-                .map_err(|source| InfrastructureError::ProcessWait {
-                    program: spec.program.clone(),
-                    source,
-                })?;
-            killed = true;
+        if cancelled() && !terminated {
+            terminated = terminate_process_group(&mut child, &spec.program)?;
         }
         match receiver.recv_timeout(Duration::from_millis(25)) {
             Ok(event) => {
@@ -114,7 +117,7 @@ pub(crate) fn run(
         stdout: captured_stdout.join("\n"),
         stderr: captured_stderr.join("\n"),
     };
-    if cancelled() {
+    if terminated {
         return Err(InfrastructureError::Cancelled);
     }
     if status.success() {
@@ -126,6 +129,33 @@ pub(crate) fn run(
             stdout: output.stdout,
             stderr: output.stderr,
         })
+    }
+}
+
+fn terminate_process_group(
+    child: &mut Child,
+    program: &std::path::Path,
+) -> Result<bool, InfrastructureError> {
+    match killpg(Pid::from_raw(child.id() as i32), Signal::SIGKILL) {
+        Ok(()) => Ok(true),
+        Err(Errno::ESRCH) => Ok(false),
+        Err(error) => {
+            if child
+                .try_wait()
+                .map_err(|source| InfrastructureError::ProcessWait {
+                    program: program.to_owned(),
+                    source,
+                })?
+                .is_some()
+            {
+                Ok(false)
+            } else {
+                Err(InfrastructureError::ProcessWait {
+                    program: program.to_owned(),
+                    source: std::io::Error::from_raw_os_error(error as i32),
+                })
+            }
+        }
     }
 }
 
@@ -209,16 +239,10 @@ mod tests {
     }
 
     #[test]
-    fn cancellation_terminates_the_direct_child() {
+    fn cancellation_terminates_descendants_holding_pipes() {
         let started = std::time::Instant::now();
-        let spec = CommandSpec {
-            program: PathBuf::from("/bin/sleep"),
-            args: vec![OsString::from("5")],
-            env: HashMap::new(),
-            current_dir: PathBuf::from("/"),
-        };
         let error = run(
-            &spec,
+            &shell("sleep 5 & echo spawned"),
             &|| started.elapsed() >= Duration::from_millis(50),
             |_| {},
         )

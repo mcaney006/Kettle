@@ -31,7 +31,7 @@ fn run() -> Result<(), &'static str> {
     let reference = raw.trim_end();
     validate_reference(reference)?;
 
-    let op = resolve_op()?;
+    let op = resolve_op(owner)?;
     let output = Command::new(op)
         .args(["read", "--no-newline", reference])
         .stdin(Stdio::null())
@@ -88,22 +88,43 @@ fn validate_reference_file(path: &Path, owner: u32) -> Result<(), &'static str> 
     Ok(())
 }
 
-fn resolve_op() -> Result<PathBuf, &'static str> {
+fn resolve_op(owner: u32) -> Result<PathBuf, &'static str> {
     OP_CANDIDATES
         .iter()
         .map(Path::new)
         .find_map(|candidate| {
             let canonical = candidate.canonicalize().ok()?;
             let metadata = std::fs::metadata(&canonical).ok()?;
-            executable_is_safe(&metadata).then_some(canonical)
+            executable_is_safe(&canonical, &metadata, owner, Path::new("/")).then_some(canonical)
         })
         .ok_or("trusted 1Password CLI was not found")
 }
 
-fn executable_is_safe(metadata: &Metadata) -> bool {
-    metadata.is_file()
+fn executable_is_safe(path: &Path, metadata: &Metadata, owner: u32, root: &Path) -> bool {
+    if !(metadata.is_file()
         && metadata.permissions().mode() & 0o111 != 0
         && metadata.permissions().mode() & 0o022 == 0
+        && (metadata.uid() == owner || metadata.uid() == 0))
+    {
+        return false;
+    }
+    let mut parent = path.parent();
+    while let Some(directory) = parent {
+        if directory == root {
+            break;
+        }
+        let Ok(metadata) = std::fs::symlink_metadata(directory) else {
+            return false;
+        };
+        if !metadata.is_dir()
+            || (metadata.uid() != owner && metadata.uid() != 0)
+            || metadata.permissions().mode() & 0o022 != 0
+        {
+            return false;
+        }
+        parent = directory.parent();
+    }
+    true
 }
 
 fn fail(message: &str) -> ! {
@@ -144,6 +165,30 @@ mod tests {
         assert!(validate_reference_file(&path, owner).is_ok());
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
         assert!(validate_reference_file(&path, owner).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn executable_requires_trusted_ownership_and_parent_permissions() {
+        let root = std::env::temp_dir().join(format!("kettle-op-{}", std::process::id()));
+        let directory = root.join("bin");
+        let path = directory.join("op");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(&path, "test").unwrap();
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let metadata = std::fs::metadata(&path).unwrap();
+        let owner = metadata.uid();
+        assert!(executable_is_safe(&path, &metadata, owner, &root));
+
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o777)).unwrap();
+        assert!(!executable_is_safe(
+            &path,
+            &std::fs::metadata(&path).unwrap(),
+            owner,
+            &root
+        ));
         std::fs::remove_dir_all(root).unwrap();
     }
 }

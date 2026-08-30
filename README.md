@@ -72,6 +72,8 @@ GitHub sign-in uses the OAuth device flow with only the `read:user` scope. It id
 
 OAuth requests have explicit connect and request deadlines. Polling honors the server interval, `slow_down`, denial, expiry, and cancellation. Access tokens are sent in an in-process HTTP Authorization header and are never placed in process arguments, environment variables, temporary files, logs, or debug output. Tokens are stored as a generic password in the macOS Keychain under Kettle's fixed service and account identifiers. Unit tests use fakes and never access a developer's Keychain or GitHub account.
 
+Signing out removes Kettle's local Keychain token; it does not revoke the OAuth grant at GitHub. If Keychain deletion fails, Kettle keeps the signed-in state and reports the failure rather than pretending the credential was removed.
+
 ## Optional sudo / 1Password integration
 
 The application bundle includes a small `kettle-askpass` helper. It is opt-in; without its configuration file Homebrew and sudo behave normally.
@@ -93,7 +95,8 @@ The search field is a GPUI input handler, not a painted key listener. It support
 | Action | Shortcut |
 | --- | --- |
 | Refresh | Command-R |
-| Upgrade all visible outdated packages | Command-U |
+| Upgrade all unpinned outdated packages | Command-U |
+| Cancel an active mutation | Command-. |
 | Clear search | Command-K |
 | Outdated / Installed / Browse | Command-1 / Command-2 / Command-3 |
 | Settings | Command-, |

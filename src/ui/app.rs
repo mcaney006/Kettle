@@ -12,11 +12,11 @@ use crate::{
         InfrastructureError,
         github::{
             GitHubTransport, MacKeychain, OAuthTransport, PollResult, TokenStore,
-            ensure_poll_allowed,
+            ensure_poll_allowed, validate_verification_uri,
         },
         homebrew::{
             HomebrewBackend, ProcessEvent, ProcessStream, SystemHomebrew, detect_prefix,
-            plan_commands,
+            execute_plans, plan_commands,
         },
     },
 };
@@ -50,6 +50,7 @@ actions!(
         Help,
         Refresh,
         UpgradeAll,
+        CancelOperation,
         Primary,
         ClearSearch,
         SelectAllPackages,
@@ -77,26 +78,11 @@ const COLUMNS: [(&str, f32); 4] = [
 const APP_FONT: &str = "IBM Plex Mono";
 const APP_FONT_DATA: &[u8] = include_bytes!("../../assets/fonts/IBMPlexMono-Regular.ttf");
 
-pub fn run() {
+pub fn run() -> Result<(), InfrastructureError> {
     let launched = Instant::now();
-    let Some(prefix) = detect_prefix() else {
-        eprintln!("Homebrew not found in /opt/homebrew or /usr/local");
-        return;
-    };
-    let backend: Arc<dyn HomebrewBackend> = match SystemHomebrew::new(prefix) {
-        Ok(backend) => Arc::new(backend),
-        Err(error) => {
-            eprintln!("Kettle could not initialize Homebrew: {error}");
-            return;
-        }
-    };
-    let transport: Arc<dyn OAuthTransport> = match GitHubTransport::new() {
-        Ok(transport) => Arc::new(transport),
-        Err(error) => {
-            eprintln!("Kettle could not initialize networking: {error}");
-            return;
-        }
-    };
+    let prefix = detect_prefix().ok_or(InfrastructureError::HomebrewUnavailable)?;
+    let backend: Arc<dyn HomebrewBackend> = Arc::new(SystemHomebrew::new(prefix)?);
+    let transport: Arc<dyn OAuthTransport> = Arc::new(GitHubTransport::new()?);
     let keychain: Arc<dyn TokenStore> = Arc::new(MacKeychain);
 
     Application::new().run(move |cx| {
@@ -131,6 +117,7 @@ pub fn run() {
             );
         }
     });
+    Ok(())
 }
 
 fn configure(cx: &mut App) {
@@ -142,6 +129,7 @@ fn configure(cx: &mut App) {
         gpui::KeyBinding::new("cmd-q", Quit, None),
         gpui::KeyBinding::new("cmd-r", Refresh, Some("Kettle")),
         gpui::KeyBinding::new("cmd-u", UpgradeAll, Some("Kettle")),
+        gpui::KeyBinding::new("cmd-.", CancelOperation, Some("Kettle")),
         gpui::KeyBinding::new("cmd-k", ClearSearch, Some("Kettle")),
         gpui::KeyBinding::new("cmd-a", SelectAllPackages, Some("Kettle")),
         gpui::KeyBinding::new("enter", Primary, Some("Kettle")),
@@ -359,6 +347,9 @@ impl Kettle {
                 })
                 .await;
             this.update(cx, |this, cx| {
+                if this.controller.state.auth != AuthState::SignedOut {
+                    return;
+                }
                 match result {
                     Ok(Some(login)) => {
                         this.controller.state.auth = AuthState::SignedIn(GitHubUser(login));
@@ -402,6 +393,16 @@ impl Kettle {
                     return;
                 }
             };
+            if let Err(error) = validate_verification_uri(&authorization.verification_uri) {
+                this.update(cx, |this, cx| {
+                    this.controller.state.auth = AuthState::Failed(auth_failure(&error));
+                    this.controller.finish_authentication();
+                    this.log_error(LogSource::GitHub, present_error(&error));
+                    cx.notify();
+                })
+                .ok();
+                return;
+            }
             let prompt = DevicePrompt {
                 user_code: authorization.user_code.clone(),
                 verification_uri: authorization.verification_uri.clone(),
@@ -417,9 +418,23 @@ impl Kettle {
             if cancel.is_cancelled() {
                 return;
             }
-            let _ = Command::new("/usr/bin/open")
-                .arg(&authorization.verification_uri)
-                .spawn();
+            let verification_uri = authorization.verification_uri.clone();
+            let open_result = cx
+                .background_spawn(async move {
+                    Command::new("/usr/bin/open").arg(verification_uri).status()
+                })
+                .await;
+            if !matches!(open_result, Ok(status) if status.success()) {
+                this.update(cx, |this, cx| {
+                    this.log_error(
+                        LogSource::GitHub,
+                        "Could not open the browser; use the verification URL shown in Settings."
+                            .to_owned(),
+                    );
+                    cx.notify();
+                })
+                .ok();
+            }
 
             let started = Instant::now();
             let mut interval = authorization.interval;
@@ -510,11 +525,22 @@ impl Kettle {
 
     fn sign_out(&mut self, cx: &mut Context<Self>) {
         self.controller.cancel_authentication();
-        self.controller.state.auth = AuthState::SignedOut;
         let keychain = self.keychain.clone();
-        cx.background_spawn(async move { keychain.delete() })
-            .detach();
-        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = cx.background_spawn(async move { keychain.delete() }).await;
+            this.update(cx, |this, cx| {
+                match result {
+                    Ok(()) => this.controller.state.auth = AuthState::SignedOut,
+                    Err(error) => {
+                        this.log_open = true;
+                        this.log_error(LogSource::GitHub, present_error(&error));
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     fn primary(&mut self, cx: &mut Context<Self>) {
@@ -528,6 +554,18 @@ impl Kettle {
 
     fn mutate(&mut self, action: BrewAction, targets: Vec<PackageId>, cx: &mut Context<Self>) {
         let Some(cancel) = self.controller.begin_mutation(action, targets.len()) else {
+            let message = if self.controller.state.operation == OperationState::Idle {
+                "No eligible packages selected."
+            } else {
+                "Another Homebrew operation is already running."
+            };
+            self.controller.state.push_log(LogEvent {
+                level: LogLevel::Info,
+                source: LogSource::Application,
+                message: message.to_owned(),
+            });
+            self.log_open = true;
+            cx.notify();
             return;
         };
         let plans = plan_commands(action, targets);
@@ -541,8 +579,7 @@ impl Kettle {
                 .background_spawn({
                     let done = done.clone();
                     async move {
-                        let mut result = Ok(());
-                        for plan in plans {
+                        let mut on_plan = |plan: &crate::infrastructure::homebrew::CommandPlan| {
                             push_pending(
                                 &pending,
                                 LogEvent {
@@ -551,26 +588,27 @@ impl Kettle {
                                     message: format!("brew {}", display_args(&plan.arguments())),
                                 },
                             );
-                            let mut on_event = |event: ProcessEvent| {
-                                push_pending(
-                                    &pending,
-                                    LogEvent {
-                                        level: match event.stream {
-                                            ProcessStream::Stdout => LogLevel::Trace,
-                                            ProcessStream::Stderr => LogLevel::Info,
-                                        },
-                                        source: LogSource::Homebrew,
-                                        message: event.message,
+                        };
+                        let mut on_event = |event: ProcessEvent| {
+                            push_pending(
+                                &pending,
+                                LogEvent {
+                                    level: match event.stream {
+                                        ProcessStream::Stdout => LogLevel::Trace,
+                                        ProcessStream::Stderr => LogLevel::Info,
                                     },
-                                );
-                            };
-                            if let Err(error) =
-                                backend.execute(&plan, &|| cancel.is_cancelled(), &mut on_event)
-                            {
-                                result = Err(error);
-                                break;
-                            }
-                        }
+                                    source: LogSource::Homebrew,
+                                    message: event.message,
+                                },
+                            );
+                        };
+                        let result = execute_plans(
+                            backend.as_ref(),
+                            &plans,
+                            &|| cancel.is_cancelled(),
+                            &mut on_plan,
+                            &mut on_event,
+                        );
                         done.store(true, Ordering::Release);
                         result
                     }
@@ -604,13 +642,17 @@ impl Kettle {
                     .await;
                 let batch = drain_pending(&pending);
                 let finished = done.load(Ordering::Acquire);
-                this.update(cx, |this, cx| {
-                    for event in batch {
-                        this.controller.state.push_log(event);
-                    }
-                    cx.notify();
-                })
-                .ok();
+                if this
+                    .update(cx, |this, cx| {
+                        for event in batch {
+                            this.controller.state.push_log(event);
+                        }
+                        cx.notify();
+                    })
+                    .is_err()
+                {
+                    break;
+                }
                 if finished
                     && pending
                         .lock()
@@ -694,7 +736,16 @@ fn present_error(error: &InfrastructureError) -> String {
             "GitHub did not respond before the request deadline.".to_owned()
         }
         InfrastructureError::OAuthDenied(description) => {
-            format!("GitHub sign-in was denied: {description}")
+            format!("GitHub sign-in was denied: {}", safe_message(description))
+        }
+        InfrastructureError::NetworkTransport(_) => {
+            "GitHub could not be reached because the network request failed.".to_owned()
+        }
+        InfrastructureError::OAuthProtocol(description) => {
+            format!("GitHub sign-in failed: {}", safe_message(description))
+        }
+        InfrastructureError::Keychain(_) => {
+            "The OAuth token could not be updated in the macOS Keychain.".to_owned()
         }
         InfrastructureError::OAuthExpired => "The GitHub device code expired.".to_owned(),
         InfrastructureError::Cancelled => "The operation was cancelled.".to_owned(),
@@ -702,9 +753,19 @@ fn present_error(error: &InfrastructureError) -> String {
     }
 }
 
+fn safe_message(message: &str) -> String {
+    message
+        .chars()
+        .filter(|character| !character.is_control())
+        .take(240)
+        .collect()
+}
+
 fn auth_failure(error: &InfrastructureError) -> AuthFailure {
     match error {
-        InfrastructureError::OAuthDenied(description) => AuthFailure::Denied(description.clone()),
+        InfrastructureError::OAuthDenied(description) => {
+            AuthFailure::Denied(safe_message(description))
+        }
         InfrastructureError::OAuthExpired => AuthFailure::Expired,
         InfrastructureError::NetworkTimeout | InfrastructureError::NetworkTransport(_) => {
             AuthFailure::Network(present_error(error))

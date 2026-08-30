@@ -84,6 +84,12 @@ impl AppController {
         self.state.operation = OperationState::Idle;
     }
 
+    pub fn cancel_mutation(&mut self) {
+        if let Some(token) = &self.mutation_cancel {
+            token.cancel();
+        }
+    }
+
     pub fn begin_authentication(&mut self) -> CancellationToken {
         self.cancel_authentication();
         let token = CancellationToken::default();
@@ -144,5 +150,13 @@ mod tests {
         controller.cancel_authentication();
         assert!(token.is_cancelled());
         assert_eq!(controller.state.auth, AuthState::SignedOut);
+    }
+
+    #[test]
+    fn mutation_is_user_cancellable() {
+        let mut controller = AppController::default();
+        let token = controller.begin_mutation(BrewAction::Upgrade, 1).unwrap();
+        controller.cancel_mutation();
+        assert!(token.is_cancelled());
     }
 }

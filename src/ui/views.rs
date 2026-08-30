@@ -216,6 +216,11 @@ impl Kettle {
         if let AuthState::AwaitingApproval(prompt) = auth {
             let code = prompt.user_code.clone();
             panel = panel
+                .child(setting(
+                    "Verification URL",
+                    prompt.verification_uri.clone(),
+                    theme,
+                ))
                 .child(
                     div()
                         .font_family(APP_FONT)
@@ -294,6 +299,10 @@ impl Render for Kettle {
         let theme = Theme::for_window(window);
         let view = self.controller.state.view;
         let busy = self.controller.state.operation != OperationState::Idle;
+        let mutating = matches!(
+            self.controller.state.operation,
+            OperationState::Mutating { .. }
+        );
         let selected = self.controller.state.selection.selected().len();
         let visible = self.controller.state.selection.visible().len();
         let counts = [
@@ -301,6 +310,7 @@ impl Render for Kettle {
             self.controller.state.packages.ids(View::Installed).len(),
             self.controller.state.packages.ids(View::Browse).len(),
         ];
+        let upgrade_all_count = self.controller.state.upgrade_all_targets().len();
         let primary_action = if view == View::Browse {
             BrewAction::Install
         } else {
@@ -312,7 +322,7 @@ impl Render for Kettle {
                 format!("{visible} matches").into()
             }
             OperationState::Idle => "".into(),
-            OperationState::Refreshing(stage) => format!("Refreshing: {stage:?}").into(),
+            OperationState::Refreshing(stage) => format!("Refreshing: {}", stage.label()).into(),
             OperationState::Mutating { action, targets } => {
                 format!("{} {targets} package(s)…", action.progressive()).into()
             }
@@ -336,13 +346,12 @@ impl Render for Kettle {
             .on_action(cx.listener(|this, _: &Refresh, _, cx| this.refresh(cx)))
             .on_action(cx.listener(|this, _: &Primary, _, cx| this.primary(cx)))
             .on_action(cx.listener(|this, _: &UpgradeAll, _, cx| {
-                let targets = this
-                    .controller
-                    .state
-                    .packages
-                    .ids(View::Outdated)
-                    .to_vec();
+                let targets = this.controller.state.upgrade_all_targets();
                 this.mutate(BrewAction::Upgrade, targets, cx);
+            }))
+            .on_action(cx.listener(|this, _: &CancelOperation, _, cx| {
+                this.controller.cancel_mutation();
+                cx.notify();
             }))
             .on_action(cx.listener(|this, _: &ClearSearch, _, cx| {
                 this.search.update(cx, SearchInput::clear);
@@ -389,9 +398,11 @@ impl Render for Kettle {
                 ));
             }))
             .on_action(cx.listener(|_, _: &Help, _, _| {
-                let _ = Command::new("/usr/bin/open")
-                    .arg("https://github.com/mcaney006/Kettle#readme")
-                    .spawn();
+                std::thread::spawn(|| {
+                    let _ = Command::new("/usr/bin/open")
+                        .arg("https://github.com/mcaney006/Kettle#readme")
+                        .status();
+                });
             }))
             .on_action(cx.listener(|_, _: &Minimize, window, _| window.minimize_window()))
             .on_action(cx.listener(|_, _: &Zoom, window, _| window.zoom_window()))
@@ -414,13 +425,20 @@ impl Render for Kettle {
                     .child(div().w(px(320.)).min_w(px(160.)).child(self.search.clone()))
                     .child(self.button(
                         "refresh",
-                        "Refresh".to_owned(),
+                        if mutating { "Cancel" } else { "Refresh" }.to_owned(),
                         false,
-                        !busy,
+                        !busy || mutating,
                         2,
                         theme,
                         cx,
-                        |this, cx| this.refresh(cx),
+                        move |this, cx| {
+                            if mutating {
+                                this.controller.cancel_mutation();
+                                cx.notify();
+                            } else {
+                                this.refresh(cx);
+                            }
+                        },
                     ))
                     .child(self.button(
                         "primary",
@@ -440,17 +458,12 @@ impl Render for Kettle {
                         "upgrade-all",
                         "Upgrade All".to_owned(),
                         false,
-                        !busy && counts[0] > 0,
+                        !busy && upgrade_all_count > 0,
                         4,
                         theme,
                         cx,
                         |this, cx| {
-                            let targets = this
-                                .controller
-                                .state
-                                .packages
-                                .ids(View::Outdated)
-                                .to_vec();
+                            let targets = this.controller.state.upgrade_all_targets();
                             this.mutate(BrewAction::Upgrade, targets, cx);
                         },
                     )),

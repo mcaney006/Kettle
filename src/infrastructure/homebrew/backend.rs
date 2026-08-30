@@ -73,6 +73,26 @@ pub trait HomebrewBackend: Send + Sync {
     ) -> Result<(), InfrastructureError>;
 }
 
+pub fn execute_plans(
+    backend: &dyn HomebrewBackend,
+    plans: &[CommandPlan],
+    cancelled: &dyn Fn() -> bool,
+    mut on_plan: impl FnMut(&CommandPlan),
+    on_event: &mut dyn FnMut(ProcessEvent),
+) -> Result<(), InfrastructureError> {
+    let mut first_error = None;
+    for plan in plans {
+        on_plan(plan);
+        if let Err(error) = backend.execute(plan, cancelled, on_event) {
+            if matches!(error, InfrastructureError::Cancelled) {
+                return Err(error);
+            }
+            first_error.get_or_insert(error);
+        }
+    }
+    first_error.map_or(Ok(()), Err)
+}
+
 pub struct SystemHomebrew {
     prefix: PathBuf,
     catalog: CacheCatalogProvider,
@@ -219,6 +239,7 @@ impl OutdatedDocument {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
 
     fn id(kind: PackageKind) -> PackageId {
         PackageId::new("shared", kind).unwrap()
@@ -238,5 +259,62 @@ mod tests {
                 [action.command(), "--cask", "shared"].map(OsString::from)
             );
         }
+    }
+
+    struct FailingFormulaBackend {
+        attempted: Mutex<Vec<PackageKind>>,
+    }
+
+    impl HomebrewBackend for FailingFormulaBackend {
+        fn prefix(&self) -> &Path {
+            Path::new("/")
+        }
+
+        fn installed(&self) -> Result<Vec<Package>, InfrastructureError> {
+            Ok(Vec::new())
+        }
+
+        fn catalog(&self, _: &dyn Fn() -> bool) -> Result<Vec<Package>, InfrastructureError> {
+            Ok(Vec::new())
+        }
+
+        fn outdated(&self, _: &dyn Fn() -> bool) -> Result<Vec<Package>, InfrastructureError> {
+            Ok(Vec::new())
+        }
+
+        fn execute(
+            &self,
+            plan: &CommandPlan,
+            _: &dyn Fn() -> bool,
+            _: &mut dyn FnMut(ProcessEvent),
+        ) -> Result<(), InfrastructureError> {
+            self.attempted.lock().unwrap().push(plan.kind);
+            if plan.kind == PackageKind::Formula {
+                Err(InfrastructureError::NonZeroExit {
+                    program: PathBuf::from("brew"),
+                    code: Some(1),
+                    stdout: String::new(),
+                    stderr: "formula failed".to_owned(),
+                })
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    #[test]
+    fn independent_namespaces_are_attempted_after_one_fails() {
+        let backend = FailingFormulaBackend {
+            attempted: Mutex::new(Vec::new()),
+        };
+        let plans = plan_commands(
+            BrewAction::Upgrade,
+            [id(PackageKind::Formula), id(PackageKind::Cask)],
+        );
+        assert!(execute_plans(&backend, &plans, &|| false, |_| {}, &mut |_| {}).is_err());
+        assert_eq!(
+            *backend.attempted.lock().unwrap(),
+            vec![PackageKind::Formula, PackageKind::Cask]
+        );
     }
 }

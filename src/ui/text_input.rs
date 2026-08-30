@@ -22,7 +22,8 @@ actions!(
         End,
         Paste,
         Cut,
-        Copy
+        Copy,
+        Submit
     ]
 );
 
@@ -40,6 +41,7 @@ pub fn bind_keys(cx: &mut App) {
         gpui::KeyBinding::new("cmd-v", Paste, Some("SearchInput")),
         gpui::KeyBinding::new("cmd-x", Cut, Some("SearchInput")),
         gpui::KeyBinding::new("cmd-c", Copy, Some("SearchInput")),
+        gpui::KeyBinding::new("enter", Submit, Some("SearchInput")),
     ]);
 }
 
@@ -172,6 +174,8 @@ impl SearchInput {
         }
     }
 
+    fn submit(&mut self, _: &Submit, _: &mut Window, _: &mut Context<Self>) {}
+
     fn mouse_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         window.focus(&self.focus);
         self.selecting = true;
@@ -236,6 +240,9 @@ impl SearchInput {
     }
 
     fn index_for_position(&self, position: Point<Pixels>) -> usize {
+        if self.content.is_empty() {
+            return 0;
+        }
         let (Some(bounds), Some(line)) = (&self.last_bounds, &self.last_layout) else {
             return 0;
         };
@@ -244,7 +251,10 @@ impl SearchInput {
         } else if position.x >= bounds.right() {
             self.content.len()
         } else {
-            line.closest_index_for_x(position.x - bounds.left())
+            clamp_content_index(
+                &self.content,
+                line.closest_index_for_x(position.x - bounds.left()),
+            )
         }
     }
 
@@ -371,15 +381,14 @@ impl EntityInputHandler for SearchInput {
 }
 
 fn offset_from_utf16(text: &str, offset: usize) -> usize {
-    text.chars()
-        .scan((0, 0), |(utf8, utf16), character| {
-            let current = (*utf8, *utf16);
-            *utf8 += character.len_utf8();
-            *utf16 += character.len_utf16();
-            Some(current)
-        })
-        .find_map(|(utf8, utf16)| (utf16 >= offset).then_some(utf8))
-        .unwrap_or(text.len())
+    let mut utf16 = 0;
+    for (utf8, character) in text.char_indices() {
+        if offset <= utf16 || offset < utf16 + character.len_utf16() {
+            return utf8;
+        }
+        utf16 += character.len_utf16();
+    }
+    text.len()
 }
 
 fn range_from_utf16(text: &str, range: &Range<usize>) -> Range<usize> {
@@ -391,6 +400,10 @@ fn floor_char_boundary(text: &str, mut offset: usize) -> usize {
         offset -= 1;
     }
     offset
+}
+
+fn clamp_content_index(content: &str, index: usize) -> usize {
+    floor_char_boundary(content, index.min(content.len()))
 }
 
 fn replace_content(content: &mut SharedString, range: Range<usize>, text: &str) -> Range<usize> {
@@ -593,6 +606,7 @@ impl Render for SearchInput {
             .on_action(cx.listener(Self::paste))
             .on_action(cx.listener(Self::cut))
             .on_action(cx.listener(Self::copy))
+            .on_action(cx.listener(Self::submit))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::mouse_down))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::mouse_up))
@@ -632,5 +646,15 @@ mod tests {
         assert_eq!(selected, 0..0);
         assert_eq!(replace_content(&mut content, selected, "🍺"), 0..4);
         assert_eq!(content.as_ref(), "🍺");
+    }
+
+    #[test]
+    fn utf16_offsets_and_hit_tests_clamp_to_scalar_boundaries() {
+        assert_eq!(offset_from_utf16("🍺x", 0), 0);
+        assert_eq!(offset_from_utf16("🍺x", 1), 0);
+        assert_eq!(offset_from_utf16("🍺x", 2), 4);
+        assert_eq!(clamp_content_index("", 12), 0);
+        assert_eq!(clamp_content_index("🍺", 2), 0);
+        assert_eq!(clamp_content_index("🍺", 9), 4);
     }
 }

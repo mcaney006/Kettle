@@ -3,6 +3,8 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum InfrastructureError {
+    #[error("Homebrew was not found in a supported prefix")]
+    HomebrewUnavailable,
     #[error("filesystem operation failed for {path}")]
     Filesystem {
         path: PathBuf,

@@ -16,10 +16,10 @@ The password can therefore exist in the 1Password process, the helper's heap, th
 
 ## Trust boundaries and controls
 
-- Kettle accepts an askpass helper only when it is a regular executable beside the running application, owned like the application executable, and not group/world writable.
+- Kettle accepts an askpass helper only when it is a regular executable resolving inside the running application's executable directory, owned like the application executable, and neither the file nor directory is group/world writable.
 - The helper accepts only a regular reference file owned by the home-directory owner with no group/world permissions. Its parent must be owned by the same user and not group/world writable.
 - References are bounded, control-character-free `op://` values containing a vault, item, and field, with an optional section.
-- `op` is resolved only from `/opt/homebrew/bin/op` or `/usr/local/bin/op`; the canonical executable must be regular, executable, and not group/world writable. `PATH` is not trusted.
+- `op` is resolved only from `/opt/homebrew/bin/op` or `/usr/local/bin/op`; the canonical executable and every parent component must be owned by root or the invoking user and must not be group/world writable. `PATH` is not trusted.
 - No shell parses the command. The helper has no third-party Rust dependencies and forbids unsafe Rust through workspace lint policy.
 - The helper's sole stdout write is the password after a successful `op` exit. Every validation, launch, authorization, and read failure exits non-zero without writing stdout. Diagnostics go to stderr and never include password bytes.
 

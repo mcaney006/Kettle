@@ -33,7 +33,10 @@ pub fn score(needle: &[u8], haystack: &[u8], raw: &[u8]) -> Option<i32> {
     if needle.len() > haystack.len() {
         return None;
     }
-    let needle_len = needle.len().min(64);
+    if needle.len() > 64 {
+        return None;
+    }
+    let needle_len = needle.len();
 
     let mut matched = 0;
     let mut end = None;
@@ -117,5 +120,6 @@ mod tests {
         assert!(scored("rip", "ripgrep").unwrap() > scored("rip", "rust-in-peace").unwrap());
         assert!(scored("np", "nosey-parker").unwrap() > scored("np", "unpack").unwrap());
         assert_eq!(scored("", "anything"), Some(0));
+        assert_eq!(scored(&"a".repeat(65), &"a".repeat(65)), None);
     }
 }

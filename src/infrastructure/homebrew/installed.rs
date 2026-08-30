@@ -19,7 +19,14 @@ pub(crate) fn discover(prefix: &Path) -> Result<Vec<Package>, InfrastructureErro
             let entry = entry.map_err(|source| InfrastructureError::filesystem(&root, source))?;
             let name = entry.file_name();
             let Some(name) = name.to_str() else { continue };
-            if name.starts_with('.') || !entry.path().is_dir() {
+            if name.starts_with('.') {
+                continue;
+            }
+            if !entry
+                .file_type()
+                .map_err(|source| InfrastructureError::filesystem(entry.path(), source))?
+                .is_dir()
+            {
                 continue;
             }
             let Some(id) = PackageId::new(name, kind) else {
@@ -101,5 +108,13 @@ mod tests {
         assert_eq!(formula.installed_version().unwrap().as_str(), "1.10");
         assert!(formula.is_pinned());
         assert!(!cask.is_pinned());
+    }
+
+    #[test]
+    fn newest_child_breaks_normalized_version_ties_deterministically() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(temp.path().join("1.0")).unwrap();
+        std::fs::create_dir_all(temp.path().join("1.00")).unwrap();
+        assert_eq!(newest_child(temp.path()).unwrap().unwrap().as_str(), "1.00");
     }
 }

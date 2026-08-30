@@ -38,7 +38,7 @@ else
 fi
 
 for target in "${TARGETS[@]}"; do
-  cargo build --release --target "$target" -p kettle -p kettle-askpass
+  cargo build --locked --release --target "$target" -p kettle -p kettle-askpass
 done
 
 rm -rf "$STAGE" "$BUILD/dmg.noindex" "$BUILD/AppIcon.iconset" "$DMG" "$PKG"

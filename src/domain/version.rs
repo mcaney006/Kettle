@@ -33,6 +33,7 @@ impl fmt::Display for Version {
 impl Ord for Version {
     fn cmp(&self, other: &Self) -> Ordering {
         super::version_cmp(self.as_str(), other.as_str())
+            .then_with(|| self.as_str().cmp(other.as_str()))
     }
 }
 
@@ -51,5 +52,13 @@ mod tests {
         assert_eq!(Version::new(""), None);
         assert_eq!(Version::new("  "), None);
         assert_eq!(Version::new("1.2").unwrap().as_str(), "1.2");
+    }
+
+    #[test]
+    fn ordering_is_consistent_with_exact_equality() {
+        let short = Version::new("1.0").unwrap();
+        let padded = Version::new("1.00").unwrap();
+        assert_ne!(short, padded);
+        assert_ne!(short.cmp(&padded), Ordering::Equal);
     }
 }

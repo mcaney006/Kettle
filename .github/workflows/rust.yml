@@ -22,7 +22,9 @@ jobs:
     timeout-minutes: 45
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
 
       - name: Install declared Rust targets
         run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
@@ -31,10 +33,10 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Clippy
-        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+        run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 
       - name: Tests
-        run: cargo test --workspace
+        run: cargo test --locked --workspace
 
       - name: Install cargo-deny
         run: rustup run stable cargo install cargo-deny --locked --version 0.20.2
@@ -47,8 +49,8 @@ jobs:
 
       - name: Release build for both supported architectures
         run: |
-          cargo build --workspace --release --all-features --target aarch64-apple-darwin
-          cargo build --workspace --release --all-features --target x86_64-apple-darwin
+          cargo build --locked --workspace --release --all-features --target aarch64-apple-darwin
+          cargo build --locked --workspace --release --all-features --target x86_64-apple-darwin
 
       - name: Universal package smoke test
         run: |

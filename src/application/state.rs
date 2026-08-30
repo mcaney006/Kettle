@@ -15,6 +15,16 @@ pub enum RefreshStage {
     Outdated,
 }
 
+impl RefreshStage {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::InstalledState => "installed packages",
+            Self::Catalog => "catalog",
+            Self::Outdated => "outdated packages",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum OperationState {
     #[default]
@@ -235,6 +245,19 @@ impl AppState {
         targets.sort();
         targets
     }
+
+    pub fn upgrade_all_targets(&self) -> Vec<PackageId> {
+        self.packages
+            .ids(View::Outdated)
+            .iter()
+            .filter(|id| {
+                self.packages
+                    .package(id)
+                    .is_some_and(|package| !package.is_pinned())
+            })
+            .cloned()
+            .collect()
+    }
 }
 
 #[cfg(test)]
@@ -293,5 +316,21 @@ mod tests {
         }
         assert_eq!(state.logs().len(), AppState::MAX_LOG_EVENTS);
         assert_eq!(state.logs().front().unwrap().message, "5");
+    }
+
+    #[test]
+    fn upgrade_all_excludes_pinned_packages() {
+        let formula = id(PackageKind::Formula);
+        let cask = id(PackageKind::Cask);
+        let mut state = AppState::default();
+        state.packages.replace(
+            Vec::new(),
+            Vec::new(),
+            vec![
+                Package::outdated(formula, Version::new("1"), Version::new("2"), true),
+                Package::outdated(cask.clone(), Version::new("1"), Version::new("2"), false),
+            ],
+        );
+        assert_eq!(state.upgrade_all_targets(), vec![cask]);
     }
 }

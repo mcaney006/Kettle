@@ -1,3 +1,3 @@
-fn main() {
-    kettle::ui::run();
+fn main() -> Result<(), kettle::infrastructure::InfrastructureError> {
+    kettle::ui::run()
 }

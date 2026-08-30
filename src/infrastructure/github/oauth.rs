@@ -66,6 +66,22 @@ pub fn ensure_poll_allowed(
     }
 }
 
+pub fn validate_verification_uri(uri: &str) -> Result<(), InfrastructureError> {
+    let parsed = reqwest::Url::parse(uri).map_err(|_| {
+        InfrastructureError::OAuthProtocol("GitHub returned an invalid verification URL".to_owned())
+    })?;
+    if parsed.scheme() != "https"
+        || parsed.host_str() != Some("github.com")
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+    {
+        return Err(InfrastructureError::OAuthProtocol(
+            "GitHub returned an untrusted verification URL".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -92,5 +108,17 @@ mod tests {
             900,
         );
         assert!(!format!("{authorization:?}").contains("device-secret"));
+    }
+
+    #[test]
+    fn browser_verification_uri_is_pinned_to_github_https() {
+        assert!(validate_verification_uri("https://github.com/login/device").is_ok());
+        for uri in [
+            "http://github.com/login/device",
+            "https://evil.example/login/device",
+            "https://github.com@evil.example/login/device",
+        ] {
+            assert!(validate_verification_uri(uri).is_err(), "accepted {uri}");
+        }
     }
 }

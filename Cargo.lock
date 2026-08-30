@@ -2968,6 +2968,7 @@ version = "0.1.0"
 dependencies = [
  "criterion",
  "gpui",
+ "nix 0.31.3",
  "proptest",
  "security-framework",
  "security-framework-sys",
